@@ -89,17 +89,46 @@ public class T2IModel
     /// <summary>Get the safetensors header from a model.</summary>
     public static string GetSafetensorsHeaderFrom(string modelPath)
     {
-        using FileStream file = File.OpenRead(modelPath);
-        byte[] lenBuf = new byte[8];
-        file.ReadExactly(lenBuf, 0, 8);
-        long len = BitConverter.ToInt64(lenBuf, 0);
-        if (len < 0 || len > 100 * 1024 * 1024)
+        using (FileStream _ = GetSafetensorsHeaderAndFileReaderFrom(modelPath, out string headerJson, out int _))
         {
-            throw new SwarmReadableErrorException($"Improper safetensors file {modelPath}. Wrong file type, or unreasonable header length: {len}");
+            return headerJson;
         }
-        byte[] dataBuf = new byte[len];
-        file.ReadExactly(dataBuf, 0, (int)len);
-        return Encoding.UTF8.GetString(dataBuf);
+    }
+
+    /// <summary>Get the safetensors header string, a filestream for the file, and the index where the body starts in the file.</summary>
+    public static FileStream GetSafetensorsHeaderAndFileReaderFrom(string modelPath, out string headerJson, out int fileBodyStartIndex)
+    {
+        headerJson = null;
+        fileBodyStartIndex = -1;
+
+        FileStream localFileStream = null;
+        try
+        {
+            localFileStream = File.OpenRead(modelPath);
+            byte[] lengthBuffer = new byte[8];
+            localFileStream.ReadExactly(lengthBuffer, 0, 8);
+            long headerLength = BitConverter.ToInt64(lengthBuffer, 0);
+            if (headerLength < 0 || headerLength > 100 * 1024 * 1024)
+            {
+                throw new SwarmReadableErrorException($"Invalid safetensors file {modelPath}. Wrong file type, or unreasonable header length: {headerLength}");
+            }
+            byte[] dataBuffer = new byte[headerLength];
+            localFileStream.ReadExactly(dataBuffer, 0, (int)headerLength);
+            headerJson = Encoding.UTF8.GetString(dataBuffer);
+
+            // Store the index where the body starts
+            fileBodyStartIndex = (int)localFileStream.Position;
+
+            // Carefully move the file stream out of the auto-dispose variable, so we can return it without disposing.
+            FileStream outFileStream = localFileStream;
+            localFileStream = null;
+
+            return outFileStream;
+        }
+        finally
+        {
+            localFileStream?.Dispose();
+        }
     }
 
     /// <summary>Returns the name of the model.</summary>

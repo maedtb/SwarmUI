@@ -300,76 +300,75 @@ public class T2IModelHandler
                 return;
             }
             Logs.Debug($"Will reapply metadata for model {model.RawFilePath}");
-            using FileStream reader = File.OpenRead(model.RawFilePath);
-            byte[] headerLen = new byte[8];
-            reader.ReadExactly(headerLen, 0, 8);
-            long len = BitConverter.ToInt64(headerLen, 0);
-            if (len < 0 || len > 100 * 1024 * 1024)
+            try
             {
-                Logs.Warning($"Model {model.Name} has invalid metadata length {len}.");
+                using FileStream reader = T2IModel.GetSafetensorsHeaderAndFileReaderFrom(model.RawFilePath, out string headerJsonString, out int fileBodyStartIndex);
+
+                JObject json = JObject.Parse(headerJsonString);
+                JObject metaHeader = (json["__metadata__"] as JObject) ?? [];
+                if (model.Metadata.Hash is null)
+                {
+                    // Metadata fix for when we generated hashes into the file metadata headers, but did not save them into the metadata cache
+                    model.Metadata.Hash = (metaHeader?.ContainsKey("modelspec.hash_sha256") ?? false) ? metaHeader.Value<string>("modelspec.hash_sha256") : "0x" + Utilities.BytesToHex(SHA256.HashData(reader));
+                    ResetMetadataFrom(model);
+                }
+                void specSet(string key, string val)
+                {
+                    if (!string.IsNullOrWhiteSpace(val))
+                    {
+                        metaHeader[$"modelspec.{key}"] = val;
+                    }
+                    else
+                    {
+                        metaHeader.Remove($"modelspec.{key}");
+                    }
+                }
+                specSet("sai_model_spec", "1.0.0");
+                specSet("title", model.Metadata.Title);
+                specSet("architecture", model.Metadata.ModelClassType);
+                specSet("author", model.Metadata.Author);
+                specSet("description", model.Metadata.Description);
+                specSet("thumbnail", model.Metadata.PreviewImage);
+                specSet("license", model.Metadata.License);
+                specSet("usage_hint", model.Metadata.UsageHint);
+                specSet("trigger_phrase", model.Metadata.TriggerPhrase);
+                specSet("tags", string.Join(",", model.Metadata.Tags ?? []));
+                specSet("merged_from", model.Metadata.MergedFrom);
+                specSet("date", model.Metadata.Date);
+                specSet("preprocessor", model.Metadata.Preprocessor);
+                specSet("resolution", $"{model.Metadata.StandardWidth}x{model.Metadata.StandardHeight}");
+                specSet("prediction_type", model.Metadata.PredictionType);
+                specSet("hash_sha256", model.Metadata.Hash);
+                if (model.Metadata.IsNegativeEmbedding)
+                {
+                    specSet("is_negative_embedding", "true");
+                }
+                json["__metadata__"] = metaHeader;
+                {
+                    using FileStream writer = File.OpenWrite(model.RawFilePath + ".tmp");
+                    byte[] headerBytes = Encoding.UTF8.GetBytes(json.ToString(Newtonsoft.Json.Formatting.None));
+                    writer.Write(BitConverter.GetBytes(headerBytes.LongLength));
+                    writer.Write(headerBytes);
+                    reader.Seek(fileBodyStartIndex, SeekOrigin.Begin);
+                    reader.CopyTo(writer);
+                    reader.Dispose();
+                }
+                // Journalling replace to prevent data loss in event of a crash.
+                DateTime createTime = File.GetCreationTimeUtc(model.RawFilePath);
+                File.Move(model.RawFilePath, model.RawFilePath + ".tmp2");
+                File.Move(model.RawFilePath + ".tmp", model.RawFilePath);
+                File.Delete(model.RawFilePath + ".tmp2");
+                File.SetCreationTimeUtc(model.RawFilePath, createTime);
+                Logs.Debug($"Completed metadata update for {model.RawFilePath}");
+            }
+            catch (SwarmReadableErrorException ex)
+            {
+                // Failed to parse file, may be invalid
+                Logs.Warning($"Failed to read Model {model.Name}: {ex}.");
+
                 File.WriteAllText(swarmjspath, model.ToNetObject("modelspec.").ToString());
                 return;
             }
-            byte[] header = new byte[len];
-            reader.ReadExactly(header, 0, (int)len);
-            string headerStr = Encoding.UTF8.GetString(header);
-            JObject json = JObject.Parse(headerStr);
-            long pos = reader.Position;
-            JObject metaHeader = (json["__metadata__"] as JObject) ?? [];
-            if (model.Metadata.Hash is null)
-            {
-                // Metadata fix for when we generated hashes into the file metadata headers, but did not save them into the metadata cache
-                model.Metadata.Hash = (metaHeader?.ContainsKey("modelspec.hash_sha256") ?? false) ? metaHeader.Value<string>("modelspec.hash_sha256") : "0x" + Utilities.BytesToHex(SHA256.HashData(reader));
-                ResetMetadataFrom(model);
-            }
-            void specSet(string key, string val)
-            {
-                if (!string.IsNullOrWhiteSpace(val))
-                {
-                    metaHeader[$"modelspec.{key}"] = val;
-                }
-                else
-                {
-                    metaHeader.Remove($"modelspec.{key}");
-                }
-            }
-            specSet("sai_model_spec", "1.0.0");
-            specSet("title", model.Metadata.Title);
-            specSet("architecture", model.Metadata.ModelClassType);
-            specSet("author", model.Metadata.Author);
-            specSet("description", model.Metadata.Description);
-            specSet("thumbnail", model.Metadata.PreviewImage);
-            specSet("license", model.Metadata.License);
-            specSet("usage_hint", model.Metadata.UsageHint);
-            specSet("trigger_phrase", model.Metadata.TriggerPhrase);
-            specSet("tags", string.Join(",", model.Metadata.Tags ?? []));
-            specSet("merged_from", model.Metadata.MergedFrom);
-            specSet("date", model.Metadata.Date);
-            specSet("preprocessor", model.Metadata.Preprocessor);
-            specSet("resolution", $"{model.Metadata.StandardWidth}x{model.Metadata.StandardHeight}");
-            specSet("prediction_type", model.Metadata.PredictionType);
-            specSet("hash_sha256", model.Metadata.Hash);
-            if (model.Metadata.IsNegativeEmbedding)
-            {
-                specSet("is_negative_embedding", "true");
-            }
-            json["__metadata__"] = metaHeader;
-            {
-                using FileStream writer = File.OpenWrite(model.RawFilePath + ".tmp");
-                byte[] headerBytes = Encoding.UTF8.GetBytes(json.ToString(Newtonsoft.Json.Formatting.None));
-                writer.Write(BitConverter.GetBytes(headerBytes.LongLength));
-                writer.Write(headerBytes);
-                reader.Seek(pos, SeekOrigin.Begin);
-                reader.CopyTo(writer);
-                reader.Dispose();
-            }
-            // Journalling replace to prevent data loss in event of a crash.
-            DateTime createTime = File.GetCreationTimeUtc(model.RawFilePath);
-            File.Move(model.RawFilePath, model.RawFilePath + ".tmp2");
-            File.Move(model.RawFilePath + ".tmp", model.RawFilePath);
-            File.Delete(model.RawFilePath + ".tmp2");
-            File.SetCreationTimeUtc(model.RawFilePath, createTime);
-            Logs.Debug($"Completed metadata update for {model.RawFilePath}");
         }
     }
 

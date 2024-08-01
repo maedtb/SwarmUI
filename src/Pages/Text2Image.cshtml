@@ -333,8 +333,10 @@
                 <div class="modal-body">
                     <div><span id="edit_model_technical_data"></span></div>
                     <hr>
-                    <div>Load from civitai: <input type="text" id="edit_model_civitai_url" class="auto-text translate" placeholder="Civitai URL" autocomplete="off" /> <button type="button" class="btn btn-primary basic-button translate" onclick="edit_model_load_civitai()">Load</button>
-                    <div id="edit_model_civitai_info"></div></div>
+                    <div>Search civitai via hash: <input type="hidden" id="edit_model_hash" value="" autocomplete="off" /><button type="button" class="btn btn-primary basic-button translate" onclick="edit_model_load_civitai_by_hash()">Search</button></div>
+                    <div>Load from civitai URL: <input type="text" id="edit_model_civitai_url" class="auto-text translate" placeholder="Civitai URL" autocomplete="off" /> <button type="button" class="btn btn-primary basic-button translate" onclick="edit_model_load_civitai_by_url()">Load URL</button></div>
+                    <div id="edit_model_civitai_info"></div>
+                    <hr>
                     <div>Author: <input type="text" id="edit_model_author" class="modal_text_extra translate" placeholder="Model Author" /></div>
                     <div>Architecture: <select id="edit_model_type" class="modal_text_extra" placeholder="Model Type">
                         @foreach (T2IModelClass arch in T2IModelClassSorter.ModelClasses.Values.OrderBy(x => x.ID))

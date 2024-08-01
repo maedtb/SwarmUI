@@ -13,7 +13,6 @@ using System.Net.WebSockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System;
 using System.Net;
 using System.Diagnostics;
 using SwarmUI.Text2Image;
@@ -646,6 +645,55 @@ public static class Utilities
     public static string HashSHA256(byte[] raw)
     {
         return BytesToHex(SHA256.HashData(raw));
+    }
+
+    /// <summary>Computes the SHA 256 hash of a file stream and returns it as plaintext.</summary>
+    public static string HashSHA256(FileStream fileStream)
+    {
+        return BytesToHex(SHA256.HashData(fileStream));
+    }
+
+    /// <summary>Checks if a provided string is a valid SHA256 hash in HEX string format, optionally not requiring a '0x' hex prefix.</summary>
+    public static bool IsValidSHA256Hash(string hashHexString, bool requireHexPrefix = true)
+    {
+        // Ensure not null or empty
+        if (string.IsNullOrEmpty(hashHexString))
+        {
+            Logs.Debug($"Invalid SHA256 string, was {(hashHexString == null ? "null" : "empty")}.");
+            return false;
+        }
+
+        int hexStartIndex = requireHexPrefix ? 2 : 0;
+        int expectedLength = hexStartIndex + (SHA256.HashSizeInBytes * 2);
+
+        // Ensure data is the correct length (optionally with the "0x" prefix). The data portion should have 2x 'HashSizeInBytes' chars of hex characters
+        if (hashHexString.Length != expectedLength)
+        {
+            Logs.Debug($"Invalid SHA256 string, expected length was {expectedLength}, but got {hashHexString.Length}.");
+            return false;
+        }
+
+        // Ensure the rest of the characters in the string are hex
+        for (int index = 0; index < hashHexString.Length; ++index)
+        {
+            char indexChar = hashHexString.ElementAt(index);
+
+            // Optionally require the '0x' hex-data prefix
+            if (index < hexStartIndex
+                && ((index == 0 && indexChar != '0') ||
+                    (index == 1 && indexChar != 'x')))
+            {
+                Logs.Debug($"Invalid SHA256 string, expected '0x' prefix, but not found.");
+                return false;
+            }
+            else if (!char.IsAsciiHexDigit(indexChar))
+            {
+                Logs.Debug($"Invalid SHA256, found invalid ascii character '{(uint)indexChar}' at index '{index}'");
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Smart clean combination of two paths in a way that allows B or C to be an absolute path.</summary>

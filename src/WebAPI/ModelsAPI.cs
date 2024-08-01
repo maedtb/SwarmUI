@@ -27,6 +27,7 @@ public static class ModelsAPI
         API.RegisterAPICall(EditWildcard, true);
         API.RegisterAPICall(EditModelMetadata, true);
         API.RegisterAPICall(DoModelDownloadWS, true);
+        API.RegisterAPICall(GenerateModelHash, true /** TODO: figure this out. TBH, no idea if this is counts as a user update, as it can mutate data.. */);
     }
 
     public static Dictionary<string, JObject> InternalExtraModels(string subtype)
@@ -501,6 +502,10 @@ public static class ModelsAPI
                     Logs.Debug($"Added Civitai API Key to download request. Original URL: {originalUrl}");
                 }
             }
+            // Specify the file format as SafeTensor, which will cause Pickle files to 404.
+            if (!url.Contains("?format=SafeTensor") && !url.Contains("&format=SafeTensor")) {
+                url += (url.Contains('?') ? "&" : "?") + "format=SafeTensor";
+            }
         }
         try
         {
@@ -580,5 +585,107 @@ public static class ModelsAPI
             await ws.SendJson(new JObject() { ["error"] = "Failed to download the model due to internal exception." }, API.WebsocketTimeout);
         }
         return null;
+    }
+
+    [API.APIDescription("Returns the hash of a model, optionally  the hash from",
+        """
+        {
+            "success": true,
+            "model" {
+                "model": "My/Model/Filepath.safetensors",
+                "hash_sha256": "0xabc...",
+            },
+        }
+        """)]
+    public static async Task<JObject> GenerateModelHash(Session session,
+        [API.APIParameter("The full filepath of the model to load.")] string modelPath,
+        [API.APIParameter("The model's subtype, eg `Stable-Diffusion`, `LoRA`, etc.")] string modelSubtype = "Stable-Diffusion",
+        [API.APIParameter("If false, don't ever write the hash into the actual file itself. Set false if you will write additional metadata to this model.")] bool writeHashToDisk = true)
+    {
+        if (!Program.T2IModelSets.TryGetValue(modelSubtype, out T2IModelHandler modelHandler) && modelSubtype != "Wildcards")
+        {
+            return new JObject()
+            {
+                ["success"] = false,
+                ["error"] = "Invalid sub-type."
+            };
+        }
+        if (TryGetRefusalForModel(session, modelPath, out JObject refusal))
+        {
+            refusal["success"] = false;
+            return refusal;
+        }
+        if (!modelHandler.Models.TryGetValue(modelPath, out T2IModel model))
+        {
+            return new JObject()
+            {
+                ["success"] = false,
+                ["error"] = "Could not find model by provided path."
+            };
+        }
+
+        // Check if we actually need to generate the hash
+        string hashSHA256 = model.Metadata?.Hash;
+        if (hashSHA256 is null || !Utilities.IsValidSHA256Hash(hashSHA256, false))
+        {
+            using (FileStream fileStream = T2IModel.GetSafetensorsHeaderAndFileReaderFrom(model.RawFilePath, out string headerJsonString, out int fileBodyStartIndex))
+            {
+                JObject headerObject = headerJsonString.ParseToJson();
+                JObject metadataObject = headerObject["__metadata__"] as JObject;
+
+                // Check for an existing hash in the file header (hack to fix case where we weren't correctly saving the hash in our metadata)
+                if (metadataObject?.ContainsKey("modelspec.hash_sha256") ?? false)
+                {
+                    hashSHA256 = metadataObject.Value<string>("modelspec.hash_sha256");
+                }
+
+                // If we didn't have a hash in the file header, or the hash fails our validation check, regenerate it
+                if (hashSHA256 is null || !Utilities.IsValidSHA256Hash(hashSHA256, false))
+                {
+                    fileStream.Seek(fileBodyStartIndex, SeekOrigin.Begin);
+                    hashSHA256 = "0x" + Utilities.HashSHA256(fileStream);
+                }
+            }
+        }
+        // Normalize hash as lowercase with '0x' prefix
+        hashSHA256 = hashSHA256.StartsWithFast("0x") ? hashSHA256.ToLowerFast() : "0x" + hashSHA256.ToLowerFast();
+        // Check if we need to save this hash
+        if (model.Metadata?.Hash is null || model.Metadata.Hash != hashSHA256)
+        {
+            // We think we need to save our has, lock the modificationhandle and
+            // check again to ensure nobody else is modifying anything.
+            lock (modelHandler.ModificationLock)
+            {
+                // Recheck now that we're in the lock
+                if (model.Metadata is null)
+                {
+                    model.Metadata = new();
+                }
+
+                if (model.Metadata.Hash != hashSHA256)
+                {
+                    model.Metadata.Hash = hashSHA256;
+
+                    modelHandler.ResetMetadataFrom(model);
+
+                    // Optionally write the updated file-header to disk.
+                    if (writeHashToDisk)
+                    {
+                        _ = Utilities.RunCheckedTask(() => modelHandler.ApplyNewMetadataDirectly(model));
+                    }
+                }
+            }
+        }
+
+        // Try to return output in the same format of T2IModel.ToNetObject, but only the information we requested
+        // or information that would help debugging (like the model's file name.)
+        return new JObject()
+        {
+            ["success"] = true,
+            ["model"] = new JObject() {
+                ["name"] = model.Name,
+                ["hash_sha256"] = hashSHA256,
+            }
+        };
     }
 }

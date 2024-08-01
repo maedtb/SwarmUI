@@ -188,20 +188,46 @@ class ModelDownloaderUtil {
         this.civitPrefix = 'https://civitai.com/';
     }
 
-    getCivitaiMetadata(id, versId, callback) {
+    isCivitaiFileSafeToDownload(fileMetadata) {
+        return true;
+        if ("metadata" in fileMetadata) {
+            if ("format" in fileMetadata["metadata"]) {
+                if (fileMetadata["metadata"]["format"] != "SafeTensor") {
+                    return false;
+                }
+            }
+        }
+        if ("name" in fileMetadata) {
+            if (fileMetadata["name"].endsWith('.safetensors') || fileMetadata["name"].endsWith('.sft')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    getCivitaiMetadataByModelId(id, versId, successCallback, errorCallback) {
+        console.log(`Querying Civitai API for modelid ${id}-${versId}.`);
         getJsonDirect(`${this.civitPrefix}api/v1/models/${id}`, (status, rawData) => {
+            if (status >= 400) {
+                let errorMessage = ("error" in rawData && rawData["error"] !== null) ? rawData["error"] : `Unknown Error (${status})`;
+                console.log(`Response from Civitai API model id query '${id}-${versId}' returned error: ${status}: ${errorMessage}.`);
+                errorCallback(errorMessage);
+                return;
+            }
+            console.log(`Response from Civitai API model id query '${id}-${versId}' returned success.`);
             let modelType = null;
             let metadata = null;
             let rawVersion = rawData.modelVersions[0];
-            let file = rawVersion.files[0];
-            if (versId) {
-                for (let vers of rawData.modelVersions) {
-                    for (let vFile of vers.files) {
-                        if (vFile.downloadUrl.endsWith(`/${versId}`)) {
-                            rawVersion = vers;
-                            file = vFile;
-                            break;
-                        }
+            let file = {"error": "no files found"};
+            for (let vers of rawData.modelVersions) {
+                for (let vFile of vers.files) {
+                    if (!this.isCivitaiFileSafeToDownload(vFile)) {
+                        file.error = "the file is not a SafeTensor file";
+                    }
+                    else if (!versId || vFile.downloadUrl.endsWith(`/${versId}`)) {
+                        rawVersion = vers;
+                        file = vFile;
+                        break;
                     }
                 }
             }
@@ -213,10 +239,12 @@ class ModelDownloaderUtil {
                 let url = `${this.civitPrefix}models/${id}?modelVersionId=${versId}`;
                 metadata = {
                     'modelspec.title': `${rawData.name} - ${rawVersion.name}`,
-                    'modelspec.author': rawData.creator.username,
                     'modelspec.description': `From <a href="${url}">${url}</a>\n${rawVersion.description || ''}\n${rawData.description}\n`,
                     'modelspec.date': rawVersion.createdAt,
                 };
+                if (rawData.creator && rawData.creator.username) {
+                    metadata['modelspec.author'] = rawData.creator.username;
+                }
                 if (rawVersion.trainedWords) {
                     metadata['modelspec.trigger_phrase'] = rawVersion.trainedWords.join(", ");
                 }
@@ -226,8 +254,8 @@ class ModelDownloaderUtil {
                 if (img) {
                     metadata['modelspec.thumbnail'] = img;
                 }
-                callback(rawData, rawVersion, metadata, modelType, file.downloadUrl, img);
-            }
+                successCallback(rawData, rawVersion, metadata, modelType, file, img);
+            };
             let imgs = rawVersion.images ? rawVersion.images.filter(img => img.type == 'image') : [];
             if (imgs.length > 0) {
                 imageToData(imgs[0].url, img => applyMetadata(img));
@@ -236,7 +264,40 @@ class ModelDownloaderUtil {
                 applyMetadata('');
             }
         }, (status, data) => {
-            callback(null, null, null, null, null, null);
+            let errorMessage = ("error" in data && data["error"] !== null) ? data["error"] : `Unknown Error (${status})`;
+            console.log(`Response from Civitai API model id query '${id}-${versId}' returned error: ${status}: ${errorMessage}.`);
+            errorCallback(errorMessage);
+        });
+    }
+
+    getCivitaiMetadataByHash(hash, successCallback, errorCallback) {
+        // Civitai "AutoV3" hashes are the first 12 characters of the SHA256 hash
+        // of the body of a safetensor file, not including the '0x' hex prefix.
+        let autoV3Hash = hash.startsWith('0x') ? hash.substring(2, 14) : hash.substring(0, 12);
+
+        console.log(`Query Civitai API for model hash '${hash}' (AutoV3: ${autoV3Hash}).`);
+        getJsonDirect(`${this.civitPrefix}api/v1/model-versions/by-hash/${autoV3Hash}`, (status, rawData) => {
+            if (status >= 400) {
+                let errorMessage = ("error" in rawData && rawData["error"] !== null) ? rawData["error"] : `Unknown Error (${status})`;
+                console.log(`Response from Civitai API model hash query '${hash}' returned error: ${status}: ${errorMessage}.`);
+                errorCallback(errorMessage);
+                return;
+            }
+            if (!("modelId" in rawData) || !("id" in rawData)) {
+                console.log(`Response from Civitai model hash query '${hash}' missing required ID field(s).`);
+                errorCallback("Invalid Civitai API response");
+                return;
+            }
+            let modelId = rawData.modelId;
+            let modelVersionId = rawData.id;
+            console.log(`Response from Civitai API model hash query '${hash}' corresponds to model '${modelId}' version '${modelVersionId}'.`);
+            // Query the main model API now for the actual metadata information now that we know the IDs for it.
+            this.getCivitaiMetadataByModelId(rawData.modelId, rawData.id, successCallback, errorCallback);
+
+        }, (status, data) => {
+            let errorMessage = ("error" in data && data["error"] !== null) ? data["error"] : `Unknown Error (${status})`;
+            console.log(`Response from Civitai API model hash query '${id}-${versId}' returned error: ${status}: ${errorMessage}.`);
+            errorCallback(errorMessage);
         });
     }
 
@@ -317,13 +378,18 @@ class ModelDownloaderUtil {
                 parts = ['models', parts[1], ''];
             }
             let loadMetadata = (id, versId) => {
-                this.getCivitaiMetadata(id, versId, (rawData, rawVersion, metadata, modelType, url, img) => {
+                this.getCivitaiMetadataByModelId(id, versId, (rawData, rawVersion, metadata, modelType, url, img) => {
                     if (!rawData) {
                         this.urlStatusArea.innerText = "URL appears to be a CivitAI link, but seems to not be valid. Please double-check the link.";
                         this.nameInput();
                         return;
                     }
-                    this.url.value = url;
+                    if ("error" in url) {
+                        this.urlStatusArea.innerText = `URL appears to be a CivitAI link, but ${url["error"]}. Please double-check the link.`;
+                        this.button.disabled = false;
+                        return;
+                    }
+                    this.url.value = url.downloadUrl;
                     if (modelType) {
                         this.type.value = modelType;
                     }
@@ -347,6 +413,8 @@ class ModelDownloaderUtil {
                     else {
                         delete this.metadataZone.dataset.image;
                     }
+                }, (errorMessage) => {
+                    this.urlStatusArea.innerText = `An error occured: ${errorMessage}`;
                 });
             }
             if (parts.length < 3) {

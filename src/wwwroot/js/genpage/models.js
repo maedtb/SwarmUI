@@ -147,6 +147,7 @@ function editModel(model, browser) {
         technical += `\nHash: ${model.hash}`;
     }
     getRequiredElementById('edit_model_technical_data').innerText = technical;
+    getRequiredElementById('edit_model_hash').value = model.hash || '';
     getRequiredElementById('edit_model_name').value = model.title || model.name;
     getRequiredElementById('edit_model_type').value = model.architecture || '';
     getRequiredElementById('edit_model_prediction_type').value = model.prediction_type || '';
@@ -159,49 +160,89 @@ function editModel(model, browser) {
     $('#edit_model_modal').modal('show');
 }
 
-function edit_model_load_civitai() {
+function edit_model_set_metadata_from_civitai_response(rawData, rawVersion, metadata, modelType, url, img) {
+    let info = getRequiredElementById('edit_model_civitai_info');
+    let applyMetadata = (fieldId, metadataKey) => {
+        if (metadata !== null && metadataKey in metadata && metadata[metadataKey] !== null) {
+            getRequiredElementById(fieldId).value = metadata[metadataKey];
+        }
+    };
+    applyMetadata('edit_model_name', 'modelspec.title');
+    applyMetadata('edit_model_author', 'modelspec.author');
+    applyMetadata('edit_model_description', 'modelspec.description');
+    applyMetadata('edit_model_date', 'modelspec.date');
+    applyMetadata('edit_model_trigger_phrase', 'modelspec.trigger_phrase');
+    applyMetadata('edit_model_tags', 'modelspec.tags');
+    if (img) {
+        let imageInput = getRequiredElementById('edit_model_image');
+        imageInput.innerHTML = '';
+        let newImg = document.createElement('img');
+        newImg.src = img;
+        newImg.id = 'edit_model_image_img';
+        newImg.style.maxWidth = '100%';
+        newImg.style.maxHeight = '';
+        imageInput.appendChild(newImg);
+        let enableImage = getRequiredElementById('edit_model_enable_image');
+        enableImage.checked = true;
+        enableImage.disabled = false;
+    }
+    info.innerText = 'Load Complete.';
+}
+
+function edit_model_set_metadata_error_message(errorMessage) {
+    let info = getRequiredElementById('edit_model_civitai_info');
+    info.innerText = `Error: ${errorMessage}.`;
+}
+
+function edit_model_load_civitai_by_url() {
     let url = getRequiredElementById('edit_model_civitai_url').value;
     let info = getRequiredElementById('edit_model_civitai_info');
     if (!url) {
-        info.innerText = 'No URL provided.';
+        info.innerText = 'Error: No URL provided.';
         return;
     }
     let [id, versId] = modelDownloader.parseCivitaiUrl(url);
     if (!id) {
-        info.innerText = 'Invalid URL.';
+        info.innerText = 'Error: Invalid URL.';
         return;
     }
-    info.innerText = 'Loading...';
-    modelDownloader.getCivitaiMetadata(id, versId, (rawData, rawVersion, metadata, modelType, url, img) => {
-        if (!rawData) {
-            info.innerText = 'Failed to load metadata.';
+    info.innerText = 'Querying Civitai API...';
+    modelDownloader.getCivitaiMetadataByModelId(id, versId, edit_model_set_metadata_from_civitai_response, edit_model_set_metadata_error_message);
+}
+
+function edit_model_load_civitai_by_hash() {
+    let info = getRequiredElementById('edit_model_civitai_info');
+    let modelHash = getRequiredElementById('edit_model_hash').value;
+    if (!modelHash) {
+        let model = curModelMenuModel;
+        if (!model) {
+            console.log("Model load civitai metadata by hash: no model set.");
+            info.innerText = 'Error: No model set.';
             return;
         }
-        getRequiredElementById('edit_model_name').value = metadata['modelspec.title'];
-        getRequiredElementById('edit_model_author').value = metadata['modelspec.author'];
-        getRequiredElementById('edit_model_description').value = metadata['modelspec.description'];
-        getRequiredElementById('edit_model_date').value = metadata['modelspec.date'];
-        if (metadata['modelspec.trigger_phrase']) {
-            getRequiredElementById('edit_model_trigger_phrase').value = metadata['modelspec.trigger_phrase'];
-        }
-        if (metadata['modelspec.tags']) {
-            getRequiredElementById('edit_model_tags').value = metadata['modelspec.tags'];
-        }
-        if (img) {
-            let imageInput = getRequiredElementById('edit_model_image');
-            imageInput.innerHTML = '';
-            let newImg = document.createElement('img');
-            newImg.src = img;
-            newImg.id = 'edit_model_image_img';
-            newImg.style.maxWidth = '100%';
-            newImg.style.maxHeight = '';
-            imageInput.appendChild(newImg);
-            let enableImage = getRequiredElementById('edit_model_enable_image');
-            enableImage.checked = true;
-            enableImage.disabled = false;
-        }
-        info.innerText = 'Loaded.';
-    });
+        let subtype = curModelMenuBrowser.subType;
+        info.innerText = 'Querying Model Hash...';
+        genericRequest('GenerateModelHash', {'modelPath': model.name, 'modelSubtype': subtype, 'writeHashToDisk': false},
+            data => {
+                if (("success" in data) === false || data.success !== true) {
+                    info.innerText = ("error" in data) ? data.error : "Error: An unknown error occured.";
+                    return;
+                }
+                if (("model" in data) === false || ("hash_sha256" in data.model) === false) {
+                    info.innerText = "Error: Hash data missing in response.";
+                    return;
+                }
+
+                let modelHashElement = getRequiredElementById('edit_model_hash');
+                modelHashElement.value = data.model.hash_sha256;
+                info.innerText = 'Querying Civitai API...';
+                modelDownloader.getCivitaiMetadataByHash(data.model.hash_sha256, edit_model_set_metadata_from_civitai_response, edit_model_set_metadata_error_message);
+            });
+        return;
+    }
+
+    info.innerText = 'Querying Civitai API...';
+    modelDownloader.getCivitaiMetadataByHash(modelHash, edit_model_set_metadata_from_civitai_response, edit_model_set_metadata_error_message);
 }
 
 function save_edit_model() {
